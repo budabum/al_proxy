@@ -55,7 +55,9 @@
 require 'webrick/httpproxy'
 require 'digest/md5'
 require 'getoptlong'
-require 'rdoc/usage'
+#require 'rdoc/usage'
+require 'yaml'
+require 'zlib'
 
 module WEBrick
   # This is copy+paste hack of WEBrick::HTTPProxyServer. It's unfortunate
@@ -67,9 +69,12 @@ module WEBrick
       @cache_directory = config.delete(:CacheDirectory)
       raise ArgumentError, "No cache directory specified" unless @cache_directory
       super(config)
+      @transparent = config[:Transparent]
     end
 
     def proxy_service(req, res)
+      #req.instance_variable_set(:@host, 'api.mcomexternal112.fds.com') if req.host == 'api.mcomexternal115.fds.com'
+      
       # Proxy Authentication
       proxy_auth(req, res)
 
@@ -85,11 +90,14 @@ module WEBrick
 
       response = nil
 
-      # Serve the cached response if it exists
-      if File.exists?(cache_file)
-        response = Marshal.load(File.new(cache_file).read)
+      # Serve the cached response if it exist
+      if File.exists?(cache_file) && !@transparent
+        STDERR.puts "From CACHE\n\n\n"
+        #response = Marshal.load(File.new(cache_file).read)
+        response = YAML.load(File.new(cache_file).read)
       else # No cached version, do a real request
         # Choose header fields to transfer
+        STDERR.puts "NO cache\n\n\n"
         header = Hash.new
         choose_header(req, header)
         set_via(header)
@@ -106,6 +114,11 @@ module WEBrick
         end
 
         begin
+          STDERR.puts "\n\t\t=============>>>>>>>"
+          STDERR.puts "\n---Host: #{req.instance_variable_get(:@host)}"
+          STDERR.puts "\n---URI: #{uri}"
+          STDERR.puts "\n---Headers: #{header}"
+          STDERR.puts "\n---Body: #{req.body}" if req.request_method == 'POST'
           http = Net::HTTP.new(uri.host, uri.port, proxy_host, proxy_port)
           http.start{
             if @config[:ProxyTimeout]
@@ -122,6 +135,16 @@ module WEBrick
               raise HTTPStatus::MethodNotAllowed,
                 "unsupported method `#{req.request_method}'."
             end
+            STDERR.puts "\nResponse Status Code: #{response.code}\n"
+            res_headers = {}
+            response.each_header{|k,v| res_headers[k]=v}
+            STDERR.puts "Response headers: #{res_headers}"
+            STDERR.puts "Type: #{response['Content-Type']}"
+            #res_body = response.body
+            #gz = Zlib::GzipReader.new(StringIO.new(res_body.to_s))    
+            #res_body = gz.read
+            #STDERR.puts "Response body: #{res_body}"
+            STDERR.puts "\n\t\t<<<<<<============="
           }
         rescue => err
           logger.debug("#{err.class}: #{err.message}")
@@ -129,9 +152,12 @@ module WEBrick
         end
 
         # Cache the response
-        FileUtils.mkdir_p(cache_dir)
-        File.open(cache_file, 'w') do |file|
-          file << Marshal.dump(response)
+        unless @transparent
+          FileUtils.mkdir_p(cache_dir)
+          File.open(cache_file, 'w') do |file|
+  #          file << Marshal.dump(response)
+            file << YAML.dump(response)
+          end
         end
       end
   
@@ -159,12 +185,14 @@ options = GetoptLong.new(
   ['--cache-directory', '-d', GetoptLong::REQUIRED_ARGUMENT],
   ['--host', '-h', GetoptLong::REQUIRED_ARGUMENT],
   ['--port', '-p', GetoptLong::REQUIRED_ARGUMENT],
+  ['--transparent', '-t', GetoptLong::NO_ARGUMENT],
   ['--help', GetoptLong::NO_ARGUMENT]
 )
 
 cache_directory = File.dirname(__FILE__) + '/.proxy_cache'
 host = '127.0.0.1'
 port = '8080'
+transparent = false
 
 options.each do |option, arg|
   case option
@@ -174,15 +202,22 @@ options.each do |option, arg|
     host = arg
   when '--port'
     port = arg.to_i
+  when '--transparent'
+    transparent = !arg.nil?
   when '--help'
-    RDoc::usage
+    cmd="head -n 25 #{__FILE__}"
+    `"#{cmd}"`
+    exit
   end
 end
 
 proxy = WEBrick::HTTPCachingProxyServer.new(
-  :CacheDirectory => cache_directory,
-  :BindAddress => host,
-  :Port => port
+  CacheDirectory: cache_directory,
+  BindAddress: host,
+  Port: port,
+  ProxiURI: 'http://localhost:8888/',
+  Transparent: transparent
 )
-trap('INT') { proxy.shutdown }
+trap('INT') { proxy.shutdown; raise IOError }
 proxy.start
+
